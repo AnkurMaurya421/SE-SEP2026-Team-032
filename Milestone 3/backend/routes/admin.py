@@ -6,8 +6,8 @@ import validators
 from auth_utils import role_required
 from constants import MATCH_STATUSES
 from database import db
-from models import EmailLog, Match, MentorProfile, StudentProfile
-from responses import error, json_body
+from models import EmailLog, Match, MentorProfile, StudentProfile, names_of
+from responses import error, json_body, to_dict_list
 from services import profiles as profile_service
 from services.analytics import capacity_summary, feedback_summary, pulse_summary
 from services.matching import waiting_students
@@ -21,21 +21,52 @@ def on_dashboard(mentor):
 
 
 def contains(text, search):
-    return search.lower() in (text or "").lower()
+    """True when the search words appear in the text. Capital letters do not matter."""
+    if text is None:
+        text = ""
+    return search.lower() in text.lower()
+
+
+def dashboard_mentors():
+    mentors = []
+    for mentor in MentorProfile.query.all():
+        if on_dashboard(mentor):
+            mentors.append(mentor)
+    return mentors
+
+
+def count_mentors_with_status(mentors, status):
+    count = 0
+    for mentor in mentors:
+        if mentor.profile_status == status:
+            count += 1
+    return count
+
+
+def count_matches_by_status():
+    """A dictionary such as {"proposed": 1, "active": 2, ...}."""
+    counts = {}
+    for status in MATCH_STATUSES:
+        counts[status] = Match.query.filter_by(status=status).count()
+    return counts
 
 
 @bp.get("/overview")
 @role_required("admin")
 def overview():
     """Numbers for the dashboard: people, matches by status, and what is waiting."""
-    everyone = MentorProfile.query.all()
-    mentors = [m for m in everyone if on_dashboard(m)]
+    mentors = dashboard_mentors()
+    total_mentor_accounts = MentorProfile.query.count()
+    mentor_numbers = {
+        "total": len(mentors),
+        "verified": count_mentors_with_status(mentors, "verified"),
+        "pending": count_mentors_with_status(mentors, "pending"),
+        "incomplete": total_mentor_accounts - len(mentors),
+    }
     return jsonify({
         "students": StudentProfile.query.count(),
-        "mentors": {"total": len(mentors), "verified": sum(m.profile_status == "verified" for m in mentors),
-                    "pending": sum(m.profile_status == "pending" for m in mentors),
-                    "incomplete": len(everyone) - len(mentors)},
-        "matches": {status: Match.query.filter_by(status=status).count() for status in MATCH_STATUSES},
+        "mentors": mentor_numbers,
+        "matches": count_matches_by_status(),
         "students_waiting_for_match": len(waiting_students()),
     })
 
@@ -51,29 +82,48 @@ def analytics():
 @role_required("admin")
 def email_log():
     """The most recent emails the platform sent (or tried to send). ?limit=50 by default."""
+    # request.args holds the values after the ? in the address
     limit = request.args.get("limit", default=50, type=int)
     if limit < 1:
         return error("limit must be 1 or more.", 400)
     rows = EmailLog.query.order_by(EmailLog.id.desc()).limit(limit).all()
-    return jsonify({"emails": [r.to_dict() for r in rows]})
+    return jsonify({"emails": to_dict_list(rows)})
+
+
+def student_matches_filters(student, filters):
+    """True when the student passes every filter the admin typed."""
+    looking = filters.get("looking")
+    if looking == "true" and not student.looking_for_mentor:
+        return False
+    if looking == "false" and student.looking_for_mentor:
+        return False
+
+    search = filters.get("search")
+    if search:
+        in_name = contains(student.user.full_name, search)
+        in_skills = contains(student.skills, search)
+        if not in_name and not in_skills:
+            return False
+
+    topic = filters.get("topic")
+    if topic and topic not in names_of(student.topics):
+        return False
+
+    level = filters.get("programme_level")
+    if level and student.programme_level != level:
+        return False
+    return True
 
 
 @bp.get("/students")
 @role_required("admin")
 def list_students():
     """Optional filters: ?search=name or skills, ?topic=Data Science, ?programme_level=Diploma, ?looking=true|false"""
-    students = StudentProfile.query.all()
-    looking = request.args.get("looking")
-    if looking in ("true", "false"):
-        students = [s for s in students if s.looking_for_mentor == (looking == "true")]
-    search, topic, level = request.args.get("search"), request.args.get("topic"), request.args.get("programme_level")
-    if search:
-        students = [s for s in students if contains(s.user.full_name, search) or contains(s.skills, search)]
-    if topic:
-        students = [s for s in students if topic in [t.name for t in s.topics]]
-    if level:
-        students = [s for s in students if s.programme_level == level]
-    return jsonify({"students": [s.to_dict() for s in students]})
+    students = []
+    for student in StudentProfile.query.all():
+        if student_matches_filters(student, request.args):
+            students.append(student)
+    return jsonify({"students": to_dict_list(students)})
 
 
 @bp.get("/students/<int:student_id>")
@@ -85,19 +135,34 @@ def get_student(student_id):
     return jsonify({"profile": student.to_dict()})
 
 
+def mentor_matches_filters(mentor, filters):
+    """True when the mentor passes every filter the admin typed."""
+    status = filters.get("status")
+    if status and mentor.profile_status != status:
+        return False
+
+    topic = filters.get("topic")
+    if topic and topic not in names_of(mentor.topics):
+        return False
+
+    search = filters.get("search")
+    if search:
+        in_name = contains(mentor.user.full_name, search)
+        in_skills = contains(mentor.skills_text, search)
+        if not in_name and not in_skills:
+            return False
+    return True
+
+
 @bp.get("/mentors")
 @role_required("admin")
 def list_mentors():
     """Mentors with a complete profile (and verified ones). Optional filters: ?status=pending|verified, ?topic=Data Science, ?search=name or skills"""
-    mentors = [m for m in MentorProfile.query.all() if on_dashboard(m)]
-    status, topic, search = request.args.get("status"), request.args.get("topic"), request.args.get("search")
-    if status:
-        mentors = [m for m in mentors if m.profile_status == status]
-    if topic:
-        mentors = [m for m in mentors if topic in [t.name for t in m.topics]]
-    if search:
-        mentors = [m for m in mentors if contains(m.user.full_name, search) or contains(m.skills_text, search)]
-    return jsonify({"mentors": [m.to_dict() for m in mentors]})
+    mentors = []
+    for mentor in dashboard_mentors():
+        if mentor_matches_filters(mentor, request.args):
+            mentors.append(mentor)
+    return jsonify({"mentors": to_dict_list(mentors)})
 
 
 @bp.get("/mentors/<int:mentor_id>")
@@ -129,7 +194,7 @@ def set_mentor_status(mentor_id):
     mentor = db.session.get(MentorProfile, mentor_id)
     if mentor is None:
         return error("Mentor not found.", 404)
-    status = (json_body()).get("status")
+    status = json_body().get("status")
     problem = validators.check_mentor_status(status)
     if problem:
         return error(problem, 400)

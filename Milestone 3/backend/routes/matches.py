@@ -7,9 +7,10 @@ from auth_utils import login_required, role_required
 from constants import MATCH_STATUSES
 from database import db
 from models import Match, MatchStatusLog, MentorProfile, Notification, StudentProfile
-from responses import error, json_body
+from responses import error, json_body, to_dict_list
 from services.match_flow import change_status, record_answer
 from services.matching import eligibility_error, recommend, score_pair
+from services.my_matches import my_matches, with_other_person
 from services.notifications import notify
 from services.smart_match import smart_recommend
 
@@ -47,8 +48,10 @@ def smart_recommendations(student_id):
 @bp.post("/admin/matches")
 @role_required("admin")
 def propose_match():
+    """The admin proposes a student and a mentor. Body: {"student_id": 1, "mentor_id": 2, "notes": "..."}"""
     data = json_body()
-    student_id, mentor_id = data.get("student_id"), data.get("mentor_id")
+    student_id = data.get("student_id")
+    mentor_id = data.get("mentor_id")
     if not isinstance(student_id, int) or not isinstance(mentor_id, int):
         return error("student_id and mentor_id are required whole numbers.", 400)
     student = db.session.get(StudentProfile, student_id)
@@ -59,17 +62,26 @@ def propose_match():
     if problem:
         return error(problem, 409)
 
+    notes = data.get("notes")
+    if notes is None:
+        notes = ""
+    match = save_new_match(student, mentor, str(notes).strip())
+    return jsonify({"match": match.to_dict()}), 201  # 201 means "created"
+
+
+def save_new_match(student, mentor, notes):
+    """Saves the proposed match, writes the first log entry and tells both people."""
     score = score_pair(student, mentor)
     match = Match(student_id=student.id, mentor_id=mentor.id, proposed_by=g.user.id, status="proposed",
-                  match_score=score["total"], score_reasons="; ".join(score["reasons"]),
-                  notes=str(data.get("notes") or "").strip())
+                  match_score=score["total"], score_reasons="; ".join(score["reasons"]), notes=notes)
     db.session.add(match)
-    db.session.flush()
-    db.session.add(MatchStatusLog(match_id=match.id, old_status=None, new_status="proposed", changed_by=g.user.id))
+    db.session.flush()  # sends the match to the database so that match.id gets a number
+    first_log = MatchStatusLog(match_id=match.id, old_status=None, new_status="proposed", changed_by=g.user.id)
+    db.session.add(first_log)
     notify(mentor.user_id, "A new student match is waiting for your response.", match.id)
     notify(student.user_id, "A mentor has been proposed for you. Please accept or decline.", match.id)
     db.session.commit()
-    return jsonify({"match": match.to_dict()}), 201
+    return match
 
 
 @bp.get("/admin/matches")
@@ -82,7 +94,7 @@ def list_matches():
     query = Match.query.order_by(Match.id.desc())
     if status:
         query = query.filter_by(status=status)
-    return jsonify({"matches": [m.to_dict() for m in query.all()]})
+    return jsonify({"matches": to_dict_list(query.all())})
 
 
 @bp.get("/admin/matches/<int:match_id>")
@@ -99,32 +111,17 @@ def get_match(match_id):
 def my_notifications():
     """The logged-in user's own notifications, newest first."""
     rows = Notification.query.filter_by(user_id=g.user.id).order_by(Notification.id.desc()).all()
-    return jsonify({"notifications": [n.to_dict() for n in rows]})
-
-
-def my_matches(user):
-    """The matches of the logged-in student or mentor, newest first."""
-    if user.role == "student":
-        profile = StudentProfile.query.filter_by(user_id=user.id).first()
-        return Match.query.filter_by(student_id=profile.id).order_by(Match.id.desc()).all()
-    profile = MentorProfile.query.filter_by(user_id=user.id).first()
-    return Match.query.filter_by(mentor_id=profile.id).order_by(Match.id.desc()).all()
-
-
-def with_other_person(match, user):
-    """The match, plus the profile of the other person. Their email is shown only once the match is active."""
-    other = match.mentor if user.role == "student" else match.student
-    person = other.to_dict()
-    if match.status not in ("active", "completed"):
-        person.pop("email", None)
-    return {**match.to_dict(), "other": person}
+    return jsonify({"notifications": to_dict_list(rows)})
 
 
 @bp.get("/matches/me")
 @role_required("student", "mentor")
 def my_match_list():
     """Matches the logged-in student or mentor is part of, with the other person's profile."""
-    return jsonify({"matches": [with_other_person(m, g.user) for m in my_matches(g.user)]})
+    result = []
+    for match in my_matches(g.user):
+        result.append(with_other_person(match, g.user))
+    return jsonify({"matches": result})
 
 
 @bp.post("/matches/<int:match_id>/respond")

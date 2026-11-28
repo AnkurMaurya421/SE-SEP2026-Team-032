@@ -1,5 +1,5 @@
 """Registration and login (US-S01, US-M01)."""
-from flask import Blueprint, g, jsonify, request
+from flask import Blueprint, g, jsonify
 
 import validators
 from auth_utils import hash_password, login_required, make_token, password_matches
@@ -23,7 +23,10 @@ def register():
                 full_name=data["full_name"].strip(), role=data["role"])
     db.session.add(user)
     db.session.flush()  # gives the user an id before the profile is created
-    profile = StudentProfile(user_id=user.id) if user.role == "student" else MentorProfile(user_id=user.id)
+    if user.role == "student":
+        profile = StudentProfile(user_id=user.id)
+    else:
+        profile = MentorProfile(user_id=user.id)
     db.session.add(profile)
     db.session.commit()
     return jsonify({"user": user.to_dict()}), 201
@@ -32,8 +35,11 @@ def register():
 @bp.post("/login")
 def login():
     data = json_body()
-    user = User.query.filter_by(email=str(data.get("email", "")).strip().lower()).first()
-    if user is None or not password_matches(user, str(data.get("password", ""))):
+    # str(...) turns whatever was sent into text, so a number or a list cannot crash the server
+    email = str(data.get("email", "")).strip().lower()
+    password = str(data.get("password", ""))
+    user = User.query.filter_by(email=email).first()
+    if user is None or not password_matches(user, password):
         return error("Invalid email or password.", 401)
     if not user.is_active:
         return error("This account is switched off.", 403)

@@ -1,6 +1,6 @@
 """A student or mentor looking after their own profile (US-S02, US-M02, US-M01 availability).
 Only the owner can reach these routes: the profile is always the logged-in user's own."""
-from flask import Blueprint, g, jsonify, request
+from flask import Blueprint, g, jsonify
 
 from auth_utils import role_required
 from constants import DURATIONS, FORMATS, TOPICS, WEEKDAYS

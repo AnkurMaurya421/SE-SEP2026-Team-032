@@ -6,8 +6,9 @@ import validators
 from auth_utils import role_required
 from database import db
 from models import Concern, Feedback, Match, now
-from responses import error, json_body
-from routes.matches import my_matches
+from responses import error, json_body, to_dict_list
+from services.match_flow import pair_names
+from services.my_matches import my_matches
 from services.notifications import notify, notify_admins
 
 bp = Blueprint("feedback", __name__, url_prefix="/api")
@@ -16,7 +17,11 @@ bp = Blueprint("feedback", __name__, url_prefix="/api")
 def own_match(match_id):
     """The match, if the logged-in student or mentor is part of it; otherwise None."""
     match = db.session.get(Match, match_id)
-    return match if match is not None and match in my_matches(g.user) else None
+    if match is None:
+        return None
+    if match not in my_matches(g.user):
+        return None
+    return match
 
 
 @bp.post("/matches/<int:match_id>/feedback")
@@ -32,9 +37,13 @@ def give_feedback(match_id):
         return error(problem, 400)
     if match.status not in ("active", "completed"):
         return error("Feedback can be given once the match is active.", 409)
-    if Feedback.query.filter_by(match_id=match.id, author_id=g.user.id).first():
+    earlier = Feedback.query.filter_by(match_id=match.id, author_id=g.user.id).first()
+    if earlier is not None:
         return error("You have already given feedback on this match.", 409)
-    row = Feedback(match_id=match.id, author_id=g.user.id, rating=data["rating"], comments=(data.get("comments") or "").strip())
+    comments = data.get("comments")
+    if comments is None:
+        comments = ""
+    row = Feedback(match_id=match.id, author_id=g.user.id, rating=data["rating"], comments=comments.strip())
     db.session.add(row)
     db.session.commit()
     return jsonify({"feedback": row.to_dict()}), 201
@@ -44,7 +53,7 @@ def give_feedback(match_id):
 @role_required("student", "mentor")
 def my_feedback():
     rows = Feedback.query.filter_by(author_id=g.user.id).order_by(Feedback.id.desc()).all()
-    return jsonify({"feedback": [r.to_dict() for r in rows]})
+    return jsonify({"feedback": to_dict_list(rows)})
 
 
 @bp.get("/admin/feedback")
@@ -55,7 +64,7 @@ def all_feedback():
     match_id = request.args.get("match_id", type=int)
     if match_id:
         query = query.filter_by(match_id=match_id)
-    return jsonify({"feedback": [r.to_dict() for r in query.all()]})
+    return jsonify({"feedback": to_dict_list(query.all())})
 
 
 @bp.post("/matches/<int:match_id>/concerns")
@@ -71,7 +80,8 @@ def raise_concern(match_id):
         return error(problem, 400)
     row = Concern(match_id=match.id, raised_by=g.user.id, text=data["text"].strip())
     db.session.add(row)
-    notify_admins(f"{g.user.full_name} ({g.user.role}) raised a concern about the match {match.student.user.full_name} / {match.mentor.user.full_name}.", match.id)
+    message = f"{g.user.full_name} ({g.user.role}) raised a concern about the match {pair_names(match)}."
+    notify_admins(message, match.id)
     db.session.commit()
     return jsonify({"concern": row.to_dict()}), 201
 
@@ -80,7 +90,7 @@ def raise_concern(match_id):
 @role_required("student", "mentor")
 def my_concerns():
     rows = Concern.query.filter_by(raised_by=g.user.id).order_by(Concern.id.desc()).all()
-    return jsonify({"concerns": [r.to_dict() for r in rows]})
+    return jsonify({"concerns": to_dict_list(rows)})
 
 
 @bp.get("/admin/concerns")
@@ -95,7 +105,7 @@ def all_concerns():
     query = Concern.query.order_by(Concern.id.desc())
     if status:
         query = query.filter_by(status=status)
-    return jsonify({"concerns": [r.to_dict() for r in query.all()]})
+    return jsonify({"concerns": to_dict_list(query.all())})
 
 
 @bp.patch("/admin/concerns/<int:concern_id>")
@@ -109,10 +119,16 @@ def update_concern(concern_id):
     problem = validators.check_concern_status(status)
     if problem:
         return error(problem, 400)
-    if status != row.status:
-        row.status = status
-        row.resolved_at = now() if status == "resolved" else None
-        if status == "resolved":
-            notify(row.raised_by, "The admin marked your concern as resolved.", row.match_id)
+    if status != row.status:  # nothing to do when the status stays the same
+        change_concern_status(row, status)
     db.session.commit()
     return jsonify({"concern": row.to_dict()})
+
+
+def change_concern_status(concern, new_status):
+    concern.status = new_status
+    if new_status == "resolved":
+        concern.resolved_at = now()
+        notify(concern.raised_by, "The admin marked your concern as resolved.", concern.match_id)
+    else:
+        concern.resolved_at = None  # opened again
