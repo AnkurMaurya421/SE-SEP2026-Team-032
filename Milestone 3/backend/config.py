@@ -10,15 +10,29 @@ except ImportError:
 
 def database_url():
     """DATABASE_URL as given by Supabase or Render. SQLAlchemy wants 'postgresql://', and Supabase needs SSL."""
-    url = os.environ.get("DATABASE_URL") or "sqlite:///mentor_connect.db"  # an empty value also means SQLite
-    if url.startswith("postgres://"):
-        url = "postgresql://" + url[len("postgres://"):]
+    url = os.environ.get("DATABASE_URL")
+    if not url:  # not set, or set to empty text: use a local SQLite file
+        return "sqlite:///mentor_connect.db"
+
+    # Some services write "postgres://"; SQLAlchemy only understands "postgresql://".
+    old_start = "postgres://"
+    if url.startswith(old_start):
+        rest_of_url = url[len(old_start):]  # everything after "postgres://"
+        url = "postgresql://" + rest_of_url
+
+    # Ask for an encrypted (SSL) connection, unless the address already says something about it.
     if url.startswith("postgresql") and "sslmode" not in url:
-        url += ("&" if "?" in url else "?") + "sslmode=require"
+        if "?" in url:
+            url = url + "&sslmode=require"  # the address already has options, so add one more
+        else:
+            url = url + "?sslmode=require"  # this is the first option
     return url
 
 
 class Config:
+    """The settings of the real app. os.environ.get("NAME") reads a setting from the computer or the .env file.
+    "a or b" means: use a, but if a is empty use b."""
+
     SECRET_KEY = os.environ.get("SECRET_KEY") or "mentor-connect-dev-secret-key-change-in-production"
     # Password of the admin account created on the first start. Set your own on the live site.
     ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")

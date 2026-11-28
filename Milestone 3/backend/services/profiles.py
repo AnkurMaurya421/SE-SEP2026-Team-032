@@ -16,15 +16,29 @@ def set_topics(profile, names):
 
 
 def copy_fields(profile, data, fields):
+    """Copies the values the client sent onto the profile. Spaces around text are removed."""
     for field in fields:
-        if field in data:
-            setattr(profile, field, data[field].strip() if isinstance(data[field], str) else data[field])
+        if field not in data:
+            continue  # not sent, so keep the old value
+        value = data[field]
+        if isinstance(value, str):
+            value = value.strip()
+        # setattr(profile, "skills", "SQL") is the same as profile.skills = "SQL",
+        # but the name of the field can come from a variable
+        setattr(profile, field, value)
+
+
+def old_values_with_new(profile, data):
+    """The current profile with the new values written over it. This is what we check."""
+    combined = profile.to_dict()
+    combined.update(data)  # update() adds or replaces items in a dictionary
+    return combined
 
 
 def save_student_profile(profile, data):
     """Fields that are missing from data keep their current value, so a partial update is fine."""
-    merged = {**profile.to_dict(), **data}
-    error = validators.check_student_profile(merged)
+    combined = old_values_with_new(profile, data)
+    error = validators.check_student_profile(combined)
     if error:
         return error
     copy_fields(profile, data, STUDENT_FIELDS)
@@ -35,8 +49,8 @@ def save_student_profile(profile, data):
 
 
 def save_mentor_profile(profile, data):
-    merged = {**profile.to_dict(), **data}
-    error = validators.check_mentor_profile(merged, places_used(profile.id))
+    combined = old_values_with_new(profile, data)
+    error = validators.check_mentor_profile(combined, places_used(profile.id))
     if error:
         return error
     copy_fields(profile, data, MENTOR_FIELDS)
@@ -48,9 +62,14 @@ def save_mentor_profile(profile, data):
 
 def tell_admins_if_complete(mentor, was_complete):
     """When a mentor finishes the profile, the admins are told that the mentor is ready for verification."""
-    if mentor.profile_complete and not was_complete and mentor.profile_status == "pending":
-        notify_admins(f"{mentor.user.full_name} ({mentor.user.email}) finished their profile and is waiting for verification.")
-        db.session.commit()
+    if was_complete:
+        return  # it was complete before, so the admins already know
+    if not mentor.profile_complete:
+        return
+    if mentor.profile_status != "pending":
+        return
+    notify_admins(f"{mentor.user.full_name} ({mentor.user.email}) finished their profile and is waiting for verification.")
+    db.session.commit()
 
 
 def add_slot(mentor, data):

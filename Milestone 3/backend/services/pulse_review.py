@@ -10,40 +10,71 @@ AI_INSTRUCTIONS = (
     "otherwise 'on track'.")
 
 
+def worrying_words_in(comment):
+    """Which words from our list appear in the comment."""
+    if comment is None:
+        comment = ""
+    text = comment.lower()  # lower() so that "Rude" and "rude" are the same
+    found = []
+    for word in WORRYING_WORDS:
+        if word in text:
+            found.append(word)
+    return found
+
+
 def rule_review(rating, comment):
-    """Returns (level, reasons). level 0 = on track, 1 = watch, 2 = needs attention."""
-    text = (comment or "").lower()
-    words_found = [word for word in WORRYING_WORDS if word in text]
+    """Returns two things: the level and a list of reasons. level 0 = on track, 1 = watch, 2 = needs attention."""
     level = 0
     reasons = []
+
     if rating <= LOW_RATING:
         level = 2
         reasons.append(f"The rating of {rating}/5 is low")
     elif rating == 3:
         level = 1
         reasons.append("The rating of 3/5 is middling")
-    if words_found:
-        level = max(level, 1)
+
+    words_found = worrying_words_in(comment)
+    if len(words_found) > 0:
+        level = max(level, 1)  # at least "watch", and never lower than it already is
         reasons.append("The comment mentions: " + ", ".join(words_found))
+
     return level, reasons
+
+
+def ask_ai_about(checkin):
+    question = {"rating": checkin.rating, "comment": checkin.comment, "week": checkin.week,
+                "written_by": checkin.by_role}
+    return ask_json(AI_INSTRUCTIONS, question)
 
 
 def review_check_in(checkin):
     """Fills in the review fields of an answered check-in."""
+    # step 1: our own rules
     level, reasons = rule_review(checkin.rating, checkin.comment)
-    reason = ". ".join(reasons) + "." if reasons else "The rating is good and the comment shows no worry."
+    if len(reasons) > 0:
+        reason = ". ".join(reasons) + "."
+    else:
+        reason = "The rating is good and the comment shows no worry."
     source = "rules"
 
-    answer = ask_json(AI_INSTRUCTIONS, {"rating": checkin.rating, "comment": checkin.comment, "week": checkin.week,
-                                         "written_by": checkin.by_role})
-    if answer and answer.get("verdict") in VERDICTS:
-        ai_level = VERDICTS.index(answer["verdict"])
-        if ai_level >= level:  # the AI may only raise the level
+    # step 2: the AI, if it is on. It may only raise the level, never lower it.
+    answer = ask_ai_about(checkin)
+    if answer is not None and answer.get("verdict") in VERDICTS:
+        ai_level = VERDICTS.index(answer["verdict"])  # index() gives the position in the list: 0, 1 or 2
+        if ai_level >= level:
             level = ai_level
-            reason = str(answer.get("reason") or reason)[:300]
             source = "ai"
+            ai_reason = answer.get("reason")
+            if ai_reason:
+                reason = str(ai_reason)
+            reason = reason[:300]  # keep at most 300 characters
 
+    # step 3: save the result
     checkin.review_verdict = VERDICTS[level]
     checkin.review_reason = reason
     checkin.review_source = source
-    checkin.review_status = "open" if level > 0 else "ok"
+    if level > 0:
+        checkin.review_status = "open"  # the admin must look at it
+    else:
+        checkin.review_status = "ok"

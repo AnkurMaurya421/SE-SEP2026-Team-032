@@ -5,9 +5,9 @@ import validators
 from auth_utils import role_required
 from database import db
 from models import CheckIn, Match
-from responses import error, json_body
+from responses import error, json_body, to_dict_list
 from services.analytics import pulse_summary
-from services.checkins import active_check_ins, flagged_check_ins, mark_reviewed, save_answer
+from services.checkins import active_check_ins, flagged_check_ins, mark_reviewed, needs_admin, save_answer
 
 bp = Blueprint("checkins", __name__, url_prefix="/api")
 
@@ -16,11 +16,15 @@ bp = Blueprint("checkins", __name__, url_prefix="/api")
 @role_required("student", "mentor")
 def my_check_ins():
     """The logged-in person's own check-ins for active matches. Optional filter: ?state=due|overdue|upcoming|submitted"""
-    state = request.args.get("state")
-    rows = [c for c in active_check_ins() if c.user_id == g.user.id]
-    if state:
-        rows = [c for c in rows if c.state() == state]
-    return jsonify({"checkins": [c.to_dict() for c in rows]})
+    wanted_state = request.args.get("state")  # None when not given
+    rows = []
+    for checkin in active_check_ins():
+        if checkin.user_id != g.user.id:
+            continue  # someone else's check-in
+        if wanted_state and checkin.state() != wanted_state:
+            continue
+        rows.append(checkin)
+    return jsonify({"checkins": to_dict_list(rows)})
 
 
 @bp.post("/checkins/<int:checkin_id>/answer")
@@ -49,7 +53,8 @@ def answer_check_in(checkin_id):
 @role_required("admin")
 def pulse():
     """The review queue (flagged answers and check-ins nobody answered) plus the summary numbers."""
-    return jsonify({"summary": pulse_summary(), "needs_review": [c.to_dict() for c in flagged_check_ins()]})
+    waiting_for_admin = to_dict_list(flagged_check_ins())
+    return jsonify({"summary": pulse_summary(), "needs_review": waiting_for_admin})
 
 
 @bp.get("/admin/matches/<int:match_id>/checkins")
@@ -59,7 +64,7 @@ def match_check_ins(match_id):
     if db.session.get(Match, match_id) is None:
         return error("Match not found.", 404)
     rows = CheckIn.query.filter_by(match_id=match_id).order_by(CheckIn.week, CheckIn.by_role).all()
-    return jsonify({"checkins": [c.to_dict() for c in rows]})
+    return jsonify({"checkins": to_dict_list(rows)})
 
 
 @bp.patch("/admin/checkins/<int:checkin_id>/review")
@@ -74,7 +79,7 @@ def review_check_in(checkin_id):
         return error("note must be text.", 400)
     if checkin.review_status == "reviewed":
         return error("This check-in is already reviewed.", 409)
-    if not (checkin.review_status == "open" or (checkin.submitted_at is None and checkin.state() == "overdue")):
+    if not needs_admin(checkin):
         return error("This check-in does not need a review.", 409)
     mark_reviewed(checkin, note)
     db.session.commit()

@@ -23,6 +23,7 @@ def mark_read(notification_id):
 @bp.post("/read-all")
 @login_required
 def mark_all_read():
+    """Marks every unread notification of the logged-in user as read."""
     rows = Notification.query.filter_by(user_id=g.user.id, is_read=False).all()
     for row in rows:
         row.is_read = True
