@@ -5,33 +5,76 @@ from services.matching import places_max, places_used
 
 
 def percent(part, whole):
-    return round(100 * part / whole) if whole else 0
+    """part out of whole, as a whole number from 0 to 100. Gives 0 when whole is 0 (we cannot divide by 0)."""
+    if whole == 0:
+        return 0
+    return round(100 * part / whole)
 
 
 def pulse_summary():
     """How the weekly check-ins of active matches are going. Only check-ins that are due or older count."""
-    live = [c for c in active_check_ins() if c.state() != "upcoming"]
-    answered = [c for c in live if c.submitted_at]
+    asked = 0
+    answered = 0
+    # one counter for each verdict
+    verdict_counts = {"on track": 0, "watch": 0, "needs attention": 0}
 
-    def count(verdict):
-        return sum(1 for c in answered if c.review_verdict == verdict)
+    for checkin in active_check_ins():
+        if checkin.state() == "upcoming":
+            continue  # "continue" skips to the next check-in
+        asked = asked + 1
+        if checkin.submitted_at is None:
+            continue
+        answered = answered + 1
+        if checkin.review_verdict in verdict_counts:
+            verdict_counts[checkin.review_verdict] += 1  # += 1 means "add one"
 
-    return {"asked": len(live), "answered": len(answered), "response_rate": percent(len(answered), len(live)),
-            "on_track": count("on track"), "watch": count("watch"), "needs_attention": count("needs attention"),
-            "unanswered": len(live) - len(answered)}
+    return {
+        "asked": asked,
+        "answered": answered,
+        "response_rate": percent(answered, asked),
+        "on_track": verdict_counts["on track"],
+        "watch": verdict_counts["watch"],
+        "needs_attention": verdict_counts["needs attention"],
+        "unanswered": asked - answered,
+    }
 
 
 def feedback_summary():
+    """How many ratings there are, their average, and how many of each star."""
     rows = Feedback.query.all()
-    average = round(sum(r.rating for r in rows) / len(rows), 1) if rows else None
-    return {"total": len(rows), "average": average,
-            "counts": [{"rating": star, "count": sum(1 for r in rows if r.rating == star)} for star in (5, 4, 3, 2, 1)]}
+
+    average = None  # there is no average when nobody has rated yet
+    if len(rows) > 0:
+        total_of_ratings = 0
+        for row in rows:
+            total_of_ratings += row.rating
+        average = round(total_of_ratings / len(rows), 1)  # 1 digit after the point
+
+    counts = []
+    for star in [5, 4, 3, 2, 1]:
+        counts.append({"rating": star, "count": count_rating(rows, star)})
+
+    return {"total": len(rows), "average": average, "counts": counts}
+
+
+def count_rating(rows, star):
+    count = 0
+    for row in rows:
+        if row.rating == star:
+            count += 1
+    return count
 
 
 def capacity_summary():
     """Places in use across the verified mentors, and one row per mentor."""
-    rows = [{"mentor_id": m.id, "mentor_name": m.user.full_name, "used": places_used(m.id), "max": places_max(m)}
-            for m in MentorProfile.query.filter_by(profile_status="verified").all()]
-    used = sum(r["used"] for r in rows)
-    places = sum(r["max"] for r in rows)
-    return {"rows": rows, "used": used, "places": places, "percent": percent(used, places)}
+    rows = []
+    total_used = 0
+    total_places = 0
+    for mentor in MentorProfile.query.filter_by(profile_status="verified").all():
+        used = places_used(mentor.id)
+        maximum = places_max(mentor)
+        rows.append({"mentor_id": mentor.id, "mentor_name": mentor.user.full_name, "used": used, "max": maximum})
+        total_used += used
+        total_places += maximum
+
+    return {"rows": rows, "used": total_used, "places": total_places, "percent": percent(total_used, total_places)}

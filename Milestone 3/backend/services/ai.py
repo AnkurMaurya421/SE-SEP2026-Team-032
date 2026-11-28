@@ -10,29 +10,47 @@ OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
 
 def ai_is_on():
-    return bool(current_app.config["OPENAI_API_KEY"])
+    """True when an OpenAI key has been set."""
+    key = current_app.config["OPENAI_API_KEY"]
+    return key != ""
 
 
 def ask_json(instructions, data):
-    """Sends the instructions and the data (a dictionary) to OpenAI and returns the JSON answer as a dictionary, or None."""
+    """Sends the instructions and the data (a dictionary) to OpenAI.
+    Returns the AI's answer as a dictionary, or None if there is no key or something went wrong."""
     if not ai_is_on():
         return None
-    payload = {
-        "model": current_app.config["OPENAI_MODEL"],
-        "response_format": {"type": "json_object"},
-        "temperature": 0.2,
-        "messages": [
-            {"role": "system", "content": instructions},
-            {"role": "user", "content": json.dumps(data)},
-        ],
-    }
-    request = urllib.request.Request(
-        OPENAI_URL, data=json.dumps(payload).encode("utf-8"), method="POST",
-        headers={"Authorization": "Bearer " + current_app.config["OPENAI_API_KEY"], "Content-Type": "application/json"})
+
+    request = build_request(instructions, data)
     try:
+        # timeout=20: stop waiting after 20 seconds
         with urllib.request.urlopen(request, timeout=20) as response:
-            reply = json.loads(response.read().decode("utf-8"))
-        answer = json.loads(reply["choices"][0]["message"]["content"])
+            reply_text = response.read().decode("utf-8")  # the raw bytes, turned into text
+        reply = json.loads(reply_text)  # json.loads turns JSON text into Python data
+        answer_text = reply["choices"][0]["message"]["content"]  # where OpenAI puts the AI's words
+        answer = json.loads(answer_text)  # we asked the AI to answer in JSON
     except Exception:  # no network, wrong key, bad JSON...
         return None
-    return answer if isinstance(answer, dict) else None
+
+    if not isinstance(answer, dict):
+        return None
+    return answer
+
+
+def build_request(instructions, data):
+    """Prepares the web request for OpenAI: what we send, where, and with which key."""
+    message_to_send = {
+        "model": current_app.config["OPENAI_MODEL"],
+        "response_format": {"type": "json_object"},  # the answer must be JSON
+        "temperature": 0.2,  # low number = steady answers, less creative
+        "messages": [
+            {"role": "system", "content": instructions},  # how the AI should behave
+            {"role": "user", "content": json.dumps(data)},  # json.dumps turns Python data into JSON text
+        ],
+    }
+    headers = {
+        "Authorization": "Bearer " + current_app.config["OPENAI_API_KEY"],
+        "Content-Type": "application/json",
+    }
+    body = json.dumps(message_to_send).encode("utf-8")  # web requests send bytes, not text
+    return urllib.request.Request(OPENAI_URL, data=body, headers=headers, method="POST")

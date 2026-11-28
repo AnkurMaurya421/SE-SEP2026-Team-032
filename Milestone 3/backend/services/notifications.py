@@ -1,4 +1,4 @@
-"""Notifications are rows in the database. Emails come in Sprint 2."""
+"""Notifications are rows in the database that each person sees inside the app. (Emails are in services/emailer.py.)"""
 from database import db
 from models import Notification, User
 

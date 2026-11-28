@@ -9,24 +9,41 @@ from services.notifications import notify_admins
 
 
 def weeks_for(duration):
-    return CHECKIN_WEEKS.get(duration, CHECKIN_WEEKS["Not sure yet"])
+    """How many weekly check-ins a mentorship of this duration gets."""
+    if duration in CHECKIN_WEEKS:
+        return CHECKIN_WEEKS[duration]
+    return CHECKIN_WEEKS["Not sure yet"]
 
 
 def schedule_check_ins(match):
     """Called when a match becomes active. Creates the rows for every week (only once)."""
-    if CheckIn.query.filter_by(match_id=match.id).count() > 0:
+    already_made = CheckIn.query.filter_by(match_id=match.id).count()
+    if already_made > 0:
         return
-    start = match.confirmed_at or now()
-    for week in range(1, weeks_for(match.student.expected_duration) + 1):
+
+    start = match.confirmed_at
+    if start is None:
+        start = now()
+
+    total_weeks = weeks_for(match.student.expected_duration)
+    # range(1, 5) gives 1, 2, 3, 4, so we add 1 to include the last week
+    for week in range(1, total_weeks + 1):
         due = start + timedelta(days=7 * week)
-        for role, profile in (("student", match.student), ("mentor", match.mentor)):
-            db.session.add(CheckIn(match_id=match.id, user_id=profile.user_id, by_role=role, week=week, due_at=due))
+        add_check_in(match, match.student.user_id, "student", week, due)
+        add_check_in(match, match.mentor.user_id, "mentor", week, due)
+
+
+def add_check_in(match, user_id, role, week, due):
+    checkin = CheckIn(match_id=match.id, user_id=user_id, by_role=role, week=week, due_at=due)
+    db.session.add(checkin)
 
 
 def save_answer(checkin, rating, comment):
     """Stores the answer, reviews it and tells the admins when it was flagged."""
     checkin.rating = rating
-    checkin.comment = (comment or "").strip()
+    if comment is None:
+        comment = ""
+    checkin.comment = comment.strip()
     checkin.submitted_at = now()
     review_check_in(checkin)
     if checkin.review_status == "open":
@@ -35,20 +52,31 @@ def save_answer(checkin, rating, comment):
 
 
 def active_check_ins():
-    """Every check-in that belongs to a match that is still active."""
-    return (CheckIn.query.join(Match, CheckIn.match_id == Match.id).filter(Match.status == "active")
-            .order_by(CheckIn.due_at).all())
+    """Every check-in that belongs to a match that is still active, earliest first."""
+    query = CheckIn.query.join(Match, CheckIn.match_id == Match.id)  # join: look at the match of each check-in
+    query = query.filter(Match.status == "active")
+    query = query.order_by(CheckIn.due_at)
+    return query.all()
 
 
 def needs_admin(checkin):
     """True for an answer the review flagged, or a check-in nobody answered in time."""
     if checkin.review_status == "open":
         return True
-    return checkin.submitted_at is None and checkin.state() == "overdue" and checkin.review_status is None
+    if checkin.review_status is not None:
+        return False  # it was fine, or the admin already reviewed it
+    if checkin.submitted_at is not None:
+        return False
+    return checkin.state() == "overdue"
 
 
 def flagged_check_ins():
-    return [c for c in active_check_ins() if needs_admin(c)]
+    """The check-ins the admin has to look at."""
+    flagged = []
+    for checkin in active_check_ins():
+        if needs_admin(checkin):
+            flagged.append(checkin)
+    return flagged
 
 
 def mark_reviewed(checkin, note):
@@ -57,4 +85,6 @@ def mark_reviewed(checkin, note):
         checkin.review_reason = "The check-in was not answered in time."
         checkin.review_source = "rules"
     checkin.review_status = "reviewed"
-    checkin.admin_note = (note or "").strip()
+    if note is None:
+        note = ""
+    checkin.admin_note = note.strip()
