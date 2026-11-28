@@ -25,16 +25,31 @@ def admin_token(client):
     return response.get_json()["token"]
 
 
+def table_row(number, case):
+    """One line of the table. The | character separates columns, so it is replaced inside the text."""
+    cells = [case["api"], case["case"], case["inputs"], case["expected"], case["actual"], case["result"]]
+    safe_cells = []
+    for cell in cells:
+        safe_cells.append(cell.replace("|", "/"))
+    return f"| {number} | " + " | ".join(safe_cells) + " |"
+
+
 def pytest_sessionfinish(session, exitstatus):
-    """Writes the test-case table (API, inputs, expected output, actual output, result) after the run."""
-    if not helpers.CASES:
+    """pytest calls this once, after all tests. It writes the test-case table
+    (API, inputs, expected output, actual output, result) into tests/test_cases.md."""
+    if len(helpers.CASES) == 0:
         return
-    path = os.path.join(os.path.dirname(__file__), "test_cases.md")
+
     rows = ["| # | API being tested | Test case | Inputs | Expected output | Actual output | Result |",
             "|---|---|---|---|---|---|---|"]
-    for number, c in enumerate(helpers.CASES, start=1):
-        cells = [c["api"], c["case"], c["inputs"], c["expected"], c["actual"], c["result"]]
-        rows.append(f"| {number} | " + " | ".join(cell.replace("|", "/") for cell in cells) + " |")
-    passed = sum(c["result"] == "Success" for c in helpers.CASES)
-    with open(path, "w") as out:
-        out.write(f"# Test cases\n\n{passed} of {len(helpers.CASES)} test cases passed.\n\n" + "\n".join(rows) + "\n")
+    passed = 0
+    number = 0
+    for case in helpers.CASES:
+        number += 1
+        rows.append(table_row(number, case))
+        if case["result"] == "Success":
+            passed += 1
+
+    path = os.path.join(os.path.dirname(__file__), "test_cases.md")
+    with open(path, "w") as output_file:
+        output_file.write(f"# Test cases\n\n{passed} of {len(helpers.CASES)} test cases passed.\n\n" + "\n".join(rows) + "\n")
