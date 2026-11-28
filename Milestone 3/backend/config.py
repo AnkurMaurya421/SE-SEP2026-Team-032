@@ -20,6 +20,12 @@ def database_url():
         rest_of_url = url[len(old_start):]  # everything after "postgres://"
         url = "postgresql://" + rest_of_url
 
+    # Say which library talks to the database: psycopg2 (it is in requirements.txt).
+    plain_start = "postgresql://"
+    if url.startswith(plain_start):
+        rest_of_url = url[len(plain_start):]
+        url = "postgresql+psycopg2://" + rest_of_url
+
     # Ask for an encrypted (SSL) connection, unless the address already says something about it.
     if url.startswith("postgresql") and "sslmode" not in url:
         if "?" in url:
