@@ -14,13 +14,28 @@ ADMIN_PASSWORD = "demo123"
 
 
 def seed_basics():
-    for name in TOPICS:
-        if not Topic.query.filter_by(name=name).first():
-            db.session.add(Topic(name=name))
-    if not User.query.filter_by(email=ADMIN_EMAIL).first():
-        db.session.add(User(email=ADMIN_EMAIL, password_hash=hash_password(current_app.config["ADMIN_PASSWORD"] or ADMIN_PASSWORD), full_name="Admin", role="admin"))
-    db.session.commit()
+    add_missing_topics()
+    add_admin_account()
+    db.session.commit()  # commit saves the changes in the database
 
+
+def add_missing_topics():
+    for name in TOPICS:
+        existing = Topic.query.filter_by(name=name).first()
+        if existing is None:
+            db.session.add(Topic(name=name))
+
+
+def add_admin_account():
+    """Creates the admin account only if it does not exist yet."""
+    existing = User.query.filter_by(email=ADMIN_EMAIL).first()
+    if existing is not None:
+        return
+    password = current_app.config["ADMIN_PASSWORD"]
+    if not password:
+        password = ADMIN_PASSWORD  # nothing was set, so use the default
+    admin = User(email=ADMIN_EMAIL, password_hash=hash_password(password), full_name="Admin", role="admin")
+    db.session.add(admin)
 
 
 # ---- Sample people for a demo (only when LOAD_DEMO_DATA=1 and the database has no students yet) ----
@@ -74,30 +89,49 @@ def add_demo_user(name, email, role):
 def seed_demo():
     """Three students, three mentors and one proposed match, so a new database is not empty."""
     if StudentProfile.query.count() > 0:
-        return
+        return  # there are students already, so do nothing
+    students = add_demo_students()
+    mentors = add_demo_mentors()
+    first_student = students[0]
+    first_mentor = mentors[0]
+    add_demo_match(first_student, first_mentor)
+    db.session.commit()
+
+
+def add_demo_students():
     students = []
     for name, email, fields, topics in DEMO_STUDENTS:
         user = add_demo_user(name, email, "student")
+        # **fields passes every item of the dictionary as a named value, e.g. skills="Python, SQL"
         profile = StudentProfile(user_id=user.id, topics=topics_named(topics), **fields)
         db.session.add(profile)
         students.append(profile)
+    return students
+
+
+def add_demo_mentors():
     mentors = []
     for name, email, fields, topics, slots in DEMO_MENTORS:
         user = add_demo_user(name, email, "mentor")
         profile = MentorProfile(user_id=user.id, topics=topics_named(topics), **fields)
         db.session.add(profile)
-        db.session.flush()
+        db.session.flush()  # flush sends the row to the database now, so profile.id gets a number
         for day, start, end in slots:
-            db.session.add(AvailabilitySlot(mentor_id=profile.id, day_of_week=day, start_time=start, end_time=end))
+            slot = AvailabilitySlot(mentor_id=profile.id, day_of_week=day, start_time=start, end_time=end)
+            db.session.add(slot)
         mentors.append(profile)
+    return mentors
+
+
+def add_demo_match(student, mentor):
     db.session.flush()
     admin = User.query.filter_by(email=ADMIN_EMAIL).first()
-    score = score_pair(students[0], mentors[0])
-    match = Match(student_id=students[0].id, mentor_id=mentors[0].id, proposed_by=admin.id, status="proposed",
+    score = score_pair(student, mentor)
+    match = Match(student_id=student.id, mentor_id=mentor.id, proposed_by=admin.id, status="proposed",
                   match_score=score["total"], score_reasons="; ".join(score["reasons"]), notes="Goal fit: analytics")
     db.session.add(match)
     db.session.flush()
-    db.session.add(MatchStatusLog(match_id=match.id, old_status=None, new_status="proposed", changed_by=admin.id))
-    notify(mentors[0].user_id, "A new student match is waiting for your response.", match.id)
-    notify(students[0].user_id, "A mentor has been proposed for you. Please accept or decline.", match.id)
-    db.session.commit()
+    first_log = MatchStatusLog(match_id=match.id, old_status=None, new_status="proposed", changed_by=admin.id)
+    db.session.add(first_log)
+    notify(mentor.user_id, "A new student match is waiting for your response.", match.id)
+    notify(student.user_id, "A mentor has been proposed for you. Please accept or decline.", match.id)
