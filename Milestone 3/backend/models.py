@@ -1,8 +1,8 @@
 """Database tables. Each table is a small class with a to_dict() that gives the JSON the API returns.
 The tables follow the ER diagram in the Milestone 2 report."""
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from constants import DEFAULT_CAPACITY
+from constants import CHECKIN_GRACE_DAYS, DEFAULT_CAPACITY
 from database import db
 
 
@@ -11,7 +11,18 @@ def now():
 
 
 def to_text(moment):
-    return moment.isoformat() if moment else None
+    """A date and time as text such as "2026-11-28T10:30:00". Returns None when there is no date."""
+    if moment is None:
+        return None
+    return moment.isoformat()
+
+
+def names_of(topics):
+    """Turns a list of Topic rows into a list of their names."""
+    names = []
+    for topic in topics:
+        names.append(topic.name)
+    return names
 
 
 # Many-to-many links between profiles and topics
@@ -59,10 +70,18 @@ class StudentProfile(db.Model):
     expected_duration = db.Column(db.String(40), default="Not sure yet")
     preferences = db.Column(db.Text, default="")
     availability_note = db.Column(db.Text, default="")
+    looking_for_mentor = db.Column(db.Boolean, default=True, nullable=False)  # False: the admin does not propose mentors now
     updated_at = db.Column(db.DateTime, default=now, onupdate=now)
 
     user = db.relationship("User")
     topics = db.relationship("Topic", secondary=student_topic)
+
+    def quiz_levels(self):
+        """A dictionary such as {"Data Science": "beginner"} from the quiz results."""
+        levels = {}
+        for result in self.quiz_results:
+            levels[result.topic] = result.level
+        return levels
 
     def to_dict(self):
         return {
@@ -70,8 +89,9 @@ class StudentProfile(db.Model):
             "programme_level": self.programme_level, "career_goals": self.career_goals, "skills": self.skills,
             "needs_text": self.needs_text, "mentoring_format": self.mentoring_format,
             "expected_duration": self.expected_duration, "preferences": self.preferences,
-            "availability_note": self.availability_note, "topics": [t.name for t in self.topics],
-            "updated_at": to_text(self.updated_at),
+            "availability_note": self.availability_note, "topics": names_of(self.topics),
+            "looking_for_mentor": self.looking_for_mentor, "updated_at": to_text(self.updated_at),
+            "levels": self.quiz_levels(),
         }
 
 
@@ -91,10 +111,24 @@ class MentorProfile(db.Model):
     topics = db.relationship("Topic", secondary=mentor_topic)
     slots = db.relationship("AvailabilitySlot", cascade="all, delete-orphan")
 
-    @property
+    @property  # lets us write mentor.profile_complete without brackets
     def profile_complete(self):
         """A mentor is sent for verification only after qualifications, bio, a topic and an availability slot are filled in."""
-        return bool(self.qualifications and self.bio and self.topics and self.slots)
+        if not self.qualifications:
+            return False
+        if not self.bio:
+            return False
+        if len(self.topics) == 0:
+            return False
+        if len(self.slots) == 0:
+            return False
+        return True
+
+    def availability_list(self):
+        slots = []
+        for slot in self.slots:
+            slots.append(slot.to_dict())
+        return slots
 
     def to_dict(self):
         return {
@@ -102,7 +136,7 @@ class MentorProfile(db.Model):
             "profile_complete": self.profile_complete,
             "qualifications": self.qualifications, "experience_years": self.experience_years, "bio": self.bio,
             "skills_text": self.skills_text, "profile_status": self.profile_status, "max_students": self.max_students,
-            "topics": [t.name for t in self.topics], "availability": [s.to_dict() for s in self.slots],
+            "topics": names_of(self.topics), "availability": self.availability_list(),
             "updated_at": to_text(self.updated_at),
         }
 
@@ -140,6 +174,12 @@ class Match(db.Model):
     mentor = db.relationship("MentorProfile")
     log = db.relationship("MatchStatusLog", order_by="MatchStatusLog.id")
 
+    def log_list(self):
+        entries = []
+        for entry in self.log:
+            entries.append(entry.to_dict())
+        return entries
+
     def to_dict(self):
         return {
             "match_id": self.id, "student_id": self.student_id, "student_name": self.student.user.full_name,
@@ -148,7 +188,7 @@ class Match(db.Model):
             "match_score": self.match_score, "score_reasons": self.score_reasons, "notes": self.notes,
             "proposed_at": to_text(self.proposed_at), "mentor_responded_at": to_text(self.mentor_responded_at),
             "student_responded_at": to_text(self.student_responded_at), "confirmed_at": to_text(self.confirmed_at),
-            "log": [entry.to_dict() for entry in self.log],
+            "log": self.log_list(),
         }
 
 
@@ -164,8 +204,13 @@ class MatchStatusLog(db.Model):
     changer = db.relationship("User")
 
     def to_dict(self):
-        return {"from": self.old_status or "-", "to": self.new_status, "at": to_text(self.changed_at),
-                "by": self.changer.full_name if self.changer else ""}
+        old_status = self.old_status
+        if not old_status:
+            old_status = "-"  # the first entry has no earlier status
+        changer_name = ""
+        if self.changer is not None:
+            changer_name = self.changer.full_name
+        return {"from": old_status, "to": self.new_status, "at": to_text(self.changed_at), "by": changer_name}
 
 
 class Notification(db.Model):
@@ -179,3 +224,134 @@ class Notification(db.Model):
 
     def to_dict(self):
         return {"notification_id": self.id, "message": self.message, "is_read": self.is_read, "sent_at": to_text(self.sent_at)}
+
+
+class Feedback(db.Model):
+    """A rating and comment about a match from the student or the mentor (one per person per match)."""
+    __tablename__ = "feedback"
+    __table_args__ = (db.UniqueConstraint("match_id", "author_id"),)
+    id = db.Column(db.Integer, primary_key=True)
+    match_id = db.Column(db.Integer, db.ForeignKey("match.id"), nullable=False)
+    author_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    rating = db.Column(db.Integer, nullable=False)  # 1 to 5
+    comments = db.Column(db.Text, default="")
+    created_at = db.Column(db.DateTime, default=now)
+
+    match = db.relationship("Match")
+    author = db.relationship("User")
+
+    def to_dict(self):
+        return {
+            "feedback_id": self.id, "match_id": self.match_id, "author_id": self.author_id, "author_name": self.author.full_name,
+            "author_role": self.author.role, "student_name": self.match.student.user.full_name,
+            "mentor_name": self.match.mentor.user.full_name, "rating": self.rating, "comments": self.comments,
+            "created_at": to_text(self.created_at),
+        }
+
+
+class Concern(db.Model):
+    """A problem with a match raised by the student or the mentor. The admin reviews it and marks it resolved."""
+    __tablename__ = "concern"
+    id = db.Column(db.Integer, primary_key=True)
+    match_id = db.Column(db.Integer, db.ForeignKey("match.id"), nullable=False)
+    raised_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    text = db.Column(db.Text, nullable=False)
+    status = db.Column(db.String(20), default="open")  # open | resolved
+    created_at = db.Column(db.DateTime, default=now)
+    resolved_at = db.Column(db.DateTime)
+
+    match = db.relationship("Match")
+    author = db.relationship("User")
+
+    def to_dict(self):
+        return {
+            "concern_id": self.id, "match_id": self.match_id, "raised_by": self.raised_by, "raised_by_name": self.author.full_name,
+            "raised_by_role": self.author.role, "student_name": self.match.student.user.full_name,
+            "mentor_name": self.match.mentor.user.full_name, "text": self.text, "status": self.status,
+            "created_at": to_text(self.created_at), "resolved_at": to_text(self.resolved_at),
+        }
+
+
+class CheckIn(db.Model):
+    """One weekly check-in that one person (the student or the mentor) answers for an active match."""
+    __tablename__ = "checkin"
+    id = db.Column(db.Integer, primary_key=True)
+    match_id = db.Column(db.Integer, db.ForeignKey("match.id"), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)  # who has to answer
+    by_role = db.Column(db.String(20), nullable=False)  # student | mentor
+    week = db.Column(db.Integer, nullable=False)
+    due_at = db.Column(db.DateTime, nullable=False)
+    submitted_at = db.Column(db.DateTime)
+    rating = db.Column(db.Integer)
+    comment = db.Column(db.Text, default="")
+    reminder_sent_at = db.Column(db.DateTime)
+    review_verdict = db.Column(db.String(20))   # on track | watch | needs attention
+    review_reason = db.Column(db.Text, default="")
+    review_status = db.Column(db.String(20))    # ok | open | reviewed
+    review_source = db.Column(db.String(20))    # rules | ai
+    admin_note = db.Column(db.Text, default="")
+
+    match = db.relationship("Match")
+    user = db.relationship("User")
+
+    def state(self, at=None):
+        """submitted, upcoming, due or overdue, at the time "at" (the time now if not given)."""
+        if at is None:
+            at = now()
+        if self.submitted_at is not None:
+            return "submitted"
+        if at < self.due_at:
+            return "upcoming"
+        last_day = self.due_at + timedelta(days=CHECKIN_GRACE_DAYS)
+        if at > last_day:
+            return "overdue"
+        return "due"
+
+    def review_dict(self):
+        """The review of the answer, or None when there is no review yet."""
+        if not self.review_verdict:
+            return None
+        return {"verdict": self.review_verdict, "reason": self.review_reason, "status": self.review_status,
+                "source": self.review_source, "admin_note": self.admin_note}
+
+    def to_dict(self):
+        return {
+            "checkin_id": self.id, "match_id": self.match_id, "week": self.week, "by": self.by_role,
+            "person_name": self.user.full_name, "student_name": self.match.student.user.full_name,
+            "mentor_name": self.match.mentor.user.full_name, "due_at": to_text(self.due_at), "state": self.state(),
+            "submitted_at": to_text(self.submitted_at), "rating": self.rating, "comment": self.comment,
+            "review": self.review_dict(),
+        }
+
+
+class EmailLog(db.Model):
+    """Every email the platform tried to send. status: sent | failed | not_configured (no Brevo key, so nothing left the server)."""
+    __tablename__ = "email_log"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    to_email = db.Column(db.String(120), nullable=False)
+    subject = db.Column(db.String(200), nullable=False)
+    body = db.Column(db.Text, nullable=False)
+    status = db.Column(db.String(20), nullable=False)
+    created_at = db.Column(db.DateTime, default=now)
+
+    def to_dict(self):
+        return {"email_id": self.id, "to_email": self.to_email, "subject": self.subject, "body": self.body,
+                "status": self.status, "created_at": to_text(self.created_at)}
+
+
+class QuizResult(db.Model):
+    """The level a student reached in the quiz for one topic."""
+    __tablename__ = "quiz_result"
+    __table_args__ = (db.UniqueConstraint("student_id", "topic"),)
+    id = db.Column(db.Integer, primary_key=True)
+    student_id = db.Column(db.Integer, db.ForeignKey("student_profile.id"), nullable=False)
+    topic = db.Column(db.String(60), nullable=False)
+    score = db.Column(db.Integer, nullable=False)
+    level = db.Column(db.String(20), nullable=False)  # beginner | intermediate | advanced
+    taken_at = db.Column(db.DateTime, default=now)
+
+    student = db.relationship("StudentProfile", backref="quiz_results")
+
+    def to_dict(self):
+        return {"topic": self.topic, "score": self.score, "level": self.level, "taken_at": to_text(self.taken_at)}

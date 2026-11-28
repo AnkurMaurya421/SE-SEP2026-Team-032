@@ -8,17 +8,29 @@ CASES = []  # one dict per check() call
 
 
 def auth(token):
-    return {"Authorization": "Bearer " + token} if token else {}
+    """The header that tells the API who is calling. Empty when there is no token."""
+    if not token:
+        return {}
+    return {"Authorization": "Bearer " + token}
 
 
 def short(value, limit=160):
-    text = json.dumps(value, ensure_ascii=False) if not isinstance(value, str) else value
-    return text if len(text) <= limit else text[:limit] + "..."
+    """The value as text, cut off after "limit" characters so the table stays readable."""
+    if isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, ensure_ascii=False)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
 
 
 def hide_password(data):
+    """A copy of the data with the password replaced by stars."""
     if isinstance(data, dict) and "password" in data:
-        return {**data, "password": "******"}
+        copy = dict(data)
+        copy["password"] = "******"
+        return copy
     return data
 
 
@@ -27,20 +39,44 @@ def check(client, method, url, status, case, json_body=None, token=None, role=""
     `case` is a short description of the test case; `role` says who is calling (for the table only)."""
     response = client.open(url, method=method, json=json_body, headers=auth(token))
     body = response.get_json(silent=True)
-    actual_text = json.dumps(body, ensure_ascii=False) if body is not None else ""
-    passed = response.status_code == status and (contains is None or contains in actual_text)
+    actual_text = ""
+    if body is not None:
+        actual_text = json.dumps(body, ensure_ascii=False)
 
-    inputs = "no body" if json_body is None else short(hide_password(json_body))
+    passed = response.status_code == status
+    if contains is not None and contains not in actual_text:
+        passed = False
+
+    record_case(method, url, status, case, json_body, role, contains, response.status_code, body, passed)
+    # assert stops the test with this message when "passed" is False
+    assert passed, f"{case}: expected status {status} and '{contains}', got {response.status_code} {actual_text}"
+    return body
+
+
+def record_case(method, url, status, case, json_body, role, contains, actual_status, body, passed):
+    """Adds one row to the test-case table."""
+    inputs = "no body"
+    if json_body is not None:
+        inputs = short(hide_password(json_body))
     if role:
         inputs = f"[{role}] " + inputs
-    expected = f"{status}" + (f", body contains '{contains}'" if contains else "")
+
+    expected = f"{status}"
+    if contains:
+        expected = expected + f", body contains '{contains}'"
+
+    shown_body = "(empty)"
+    if body is not None:
+        shown_body = short(body)
+
+    result = "Fail"
+    if passed:
+        result = "Success"
+
     CASES.append({
         "api": f"{method} {url}", "case": case, "inputs": inputs, "expected": expected,
-        "actual": f"{response.status_code} {short(body) if body is not None else '(empty)'}",
-        "result": "Success" if passed else "Fail",
+        "actual": f"{actual_status} {shown_body}", "result": result,
     })
-    assert passed, f"{case}: expected {expected}, got {response.status_code} {actual_text}"
-    return body
 
 
 # ---- small setup helpers (not recorded as test cases) ----

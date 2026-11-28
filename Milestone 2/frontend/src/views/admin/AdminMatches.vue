@@ -5,6 +5,7 @@ import { waitingStudents, used, maxOf } from '../../services/matching';
 import { bothAccepted } from '../../services/matches';
 import { proposeMatch, setStatus } from '../../services/actions';
 import { session } from '../../services/auth';
+import { API_ON } from '../../services/api';
 import { useDb } from '../../composables/useDb';
 import { useToast } from '../../composables/useToast';
 import { userName, when } from '../../utils/format';
@@ -17,6 +18,9 @@ import MatchCompare from '../../components/match/MatchCompare.vue';
 const { db, commit } = useDb();
 const { toast } = useToast();
 const me = session.value;
+
+/* Live: the rule score the backend stored with the match. Preview: the offline Smart Match score. */
+const scoreOf = m => (API_ON ? m.matchScore : m.smartScore);
 
 const students = computed(() => waitingStudents(db));
 const mentors = computed(() => db.users.filter(u => u.role === 'mentor' && db.mentors[u.id].status === 'verified'));
@@ -70,7 +74,7 @@ async function change(m, event) {
       Smart Match reads what each student and mentor wrote about their needs and skills, and scores every waiting student against each verified mentor with free places, out of 100.
       Unverified mentors and mentors who are full are not shown. A score under {{ MIN_SCORE }} is a weak fit. It only suggests; you decide.
     </p>
-    <p class="muted">Design preview: the AI agent is built in Sprint 2. This page uses an offline stand-in that compares the wording of the two texts and the topics and experience, and gives the same kind of score and reason.</p>
+    <p v-if="!API_ON" class="muted">Design preview: this page uses an offline stand-in that compares the wording of the two texts and the topics and experience, and gives the same kind of score and reason.</p>
     <RecommendationTable :per-student="3" />
   </div>
 
@@ -99,13 +103,13 @@ async function change(m, event) {
   <h2 style="margin-top: 24px">All matches</h2>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Student</th><th>Mentor</th><th>Status</th><th>Smart Match</th><th>Mentor response</th><th>Student response</th><th>Proposed</th><th>Action</th></tr></thead>
+      <thead><tr><th>Student</th><th>Mentor</th><th>Status</th><th>{{ API_ON ? 'Match score' : 'Smart Match' }}</th><th>Mentor response</th><th>Student response</th><th>Proposed</th><th>Action</th></tr></thead>
       <tbody>
         <tr v-for="m in db.matches" :key="m.id">
           <td>{{ userName(db, m.studentId) }}</td>
           <td>{{ userName(db, m.mentorId) }}</td>
           <td><StatusPill :value="m.status" /><br /><span class="muted">{{ m.log.length }} update(s)</span></td>
-          <td><ScoreBar v-if="m.smartScore != null" :total="m.smartScore" /><span v-else>-</span></td>
+          <td><ScoreBar v-if="scoreOf(m) != null" :total="scoreOf(m)" /><span v-else>-</span></td>
           <td>
             <template v-if="m.status === 'proposed'"><StatusPill :value="m.mentorResponse" /><template v-if="m.mentorRespondedAt"><br /><span class="muted">{{ when(m.mentorRespondedAt) }}</span></template></template>
             <span v-else class="muted">-</span>

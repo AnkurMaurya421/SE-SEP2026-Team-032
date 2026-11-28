@@ -1,7 +1,8 @@
-# Mentor Connect backend (Sprint 1, Milestone 3)
+# Mentor Connect backend (Sprint 1 and Sprint 2)
 
 Team 032 (Himalayan Coders): Student Mentoring and Career Support Platform.
-A small Flask + SQLite backend. It implements the Sprint 1 user stories and is described in `swagger.yaml`.
+A small Flask backend (SQLite locally, Supabase Postgres when hosted), described in `swagger.yaml`.
+OpenAI and Brevo are optional: see `../DEPLOY.md` for every setting.
 
 ## Run it
 
@@ -20,10 +21,33 @@ Open `swagger.yaml` in https://editor.swagger.io to read the API.
 ## Run the tests
 
 ```bash
-pytest -v                         # 97 tests; each test uses its own in-memory database
+pytest -v                         # 151 tests; each test uses its own in-memory database (no keys needed)
 ```
 
 After a run, `tests/test_cases.md` holds the test-case table (API, inputs, expected output, actual output, result).
+
+## Reading the code (start here if you are new to Python)
+
+Read the files in this order:
+
+1. `app.py`: how the app is built and where the routes come from.
+2. `constants.py` and `config.py`: the fixed lists, rules and settings.
+3. `models.py`: the database tables.
+4. `routes/auth.py`, then the other files in `routes/`: what happens when a request arrives.
+5. `services/`: the rules, one topic per file.
+
+Python ideas you will meet:
+
+| You see | It means |
+|---|---|
+| `@bp.get("/path")` | The function below answers this web address |
+| `@role_required("admin")` | Check the login and the role before running the function |
+| `f"Hello {name}"` | Text with the value of `name` put inside |
+| `data.get("rating")` | Read a value from a dictionary; `None` if it is not there |
+| `for item in items:` | Do the indented lines once for every item |
+| `return a, b` | A function that gives back two values |
+| `Match.query.filter_by(status="active")` | Ask the database for the matches that are active |
+| `db.session.add(row)` then `commit()` | Save a new row in the database |
 
 ## Folder guide
 
@@ -35,8 +59,11 @@ After a run, `tests/test_cases.md` holds the test-case table (API, inputs, expec
 | `auth_utils.py` | Passwords, login tokens, `login_required` and `role_required` |
 | `validators.py` | Input checks that return an error message or `None` |
 | `responses.py` | The one error format `{"error": "message"}` |
-| `routes/` | One file per area: `auth`, `profiles`, `admin`, `matches` (thin: read input, call a function, return JSON) |
-| `services/` | The logic: `matching` (rules and score), `profiles` (saving), `match_flow` (answers and status changes), `notifications` |
+| `routes/` | One file per area: `auth`, `profiles`, `admin`, `matches`, `feedback`, `checkins`, `notifications`, `quiz`, `jobs` (thin: read input, call a function, return JSON) |
+| `services/` | The logic: `matching`, `profiles`, `match_flow`, `notifications` |
+| | `checkins`, `pulse_review`, `reminders` (Mentorship Pulse) |
+| | `my_matches` (what a student or mentor may see) |
+| | `smart_match`, `ai` (OpenAI), `emailer` (Brevo), `quiz`, `readiness`, `analytics` |
 | `seed.py` | Topics and the admin account, and optional sample people (`LOAD_DEMO_DATA=1`) |
 | `swagger.yaml` | The API description with user-story mapping and errors |
 | `tests/` | pytest tests |
